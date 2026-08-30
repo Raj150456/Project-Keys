@@ -3,7 +3,13 @@
 <p align="center">
   <img src="https://readme-typing-svg.herokuapp.com/?lines=Live+Gemma+3+Judging...;Zero+Latency+AR...;Local+Ollama+AI...;Multiplayer+Pookalam...&font=Fira+Code&center=true&width=500&height=45&color=F7921E&vCenter=true&size=22" alt="Typing SVG">
 </p>
-![AR Pookalam Banner](https://img.shields.io/badge/Status-Hackathon_Ready-success?style=for-the-badge) ![Python](https://img.shields.io/badge/Python-3.13-blue?style=for-the-badge&logo=python) ![MediaPipe](https://img.shields.io/badge/MediaPipe-Vision-orange?style=for-the-badge) ![Ollama](https://img.shields.io/badge/AI-Ollama_Gemma3-white?style=for-the-badge)
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Status-Hackathon_Ready-success?style=for-the-badge" alt="Status">
+  <img src="https://img.shields.io/badge/Python-3.13-blue?style=for-the-badge&logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/MediaPipe-Vision-orange?style=for-the-badge" alt="MediaPipe">
+  <img src="https://img.shields.io/badge/AI-Ollama_Gemma3-white?style=for-the-badge" alt="Ollama">
+</p>
 
 **AR Pookalam** is a highly interactive, two-player split-screen Augmented Reality game where players craft beautiful traditional Onam mandalas (Pookalams) in mid-air using their bare hands.
 
