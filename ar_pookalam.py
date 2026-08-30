@@ -1,5 +1,7 @@
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision as mp_vision
 import numpy as np
 import math
 import random
@@ -9,6 +11,31 @@ import os
 import threading
 import urllib.request
 import urllib.error
+
+
+HAND_LANDMARKER_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
+HAND_LANDMARKER_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task"
+)
+
+
+def ensure_hand_landmarker_model():
+    """Download the MediaPipe hand landmarker model if not already present."""
+    if os.path.exists(HAND_LANDMARKER_MODEL_PATH):
+        return
+    print("Downloading MediaPipe hand landmarker model (~2 MB)...")
+    try:
+        urllib.request.urlretrieve(HAND_LANDMARKER_MODEL_URL, HAND_LANDMARKER_MODEL_PATH)
+        print("Model downloaded successfully.")
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to download hand landmarker model: {e}\n"
+            f"Please manually download it from:\n  {HAND_LANDMARKER_MODEL_URL}\n"
+            f"and place it at: {HAND_LANDMARKER_MODEL_PATH}"
+        ) from e
 
 # --- Traditional Kerala & Modern Floral Colors (BGR) ---
 FLOWER_PALETTE = [
@@ -167,24 +194,26 @@ class PaletteFlower:
         draw_styled_flower(frame, self.x, self.y, self.radius, self.color, is_selected=self.is_selected)
 
 
-def build_sockets(center_x, center_y, player_id):
+def build_sockets(center_x, center_y, player_id, scale=1.0):
     """
-    Builds large, spacious snap sockets:
-    1 Center (r=30) + 6 Ring1 (r=25) + 10 Ring2 (r=25) + 14 Ring3 (r=25) = 31 total sockets.
+    Builds spacious snap sockets scaled to display resolution.
+    1 Center + 6 Ring1 + 10 Ring2 + 14 Ring3 = 31 total sockets.
     """
     sockets = []
     
-    # 0. Large Center Core Socket
-    sockets.append(PookalamSocket(player_id, center_x, center_y, radius=30, ring_idx=0, ring_pos_idx=0))
+    # 0. Center Core Socket
+    sockets.append(PookalamSocket(player_id, center_x, center_y, radius=int(30 * scale), ring_idx=0, ring_pos_idx=0))
     
-    # Ring configuration: (distance_from_center, count, socket_radius)
+    # Ring configuration: (base_distance, count, base_socket_radius)
     rings = [
-        (72, 6, 25),   # Inner Petal Ring (6 sockets)
-        (138, 10, 25), # Middle Petal Ring (10 sockets)
-        (204, 14, 25)  # Outer Petal Ring (14 sockets)
+        (72, 6, 25),   # Inner Petal Ring
+        (138, 10, 25), # Middle Petal Ring
+        (204, 14, 25)  # Outer Petal Ring
     ]
     
-    for ring_idx, (dist, count, s_rad) in enumerate(rings, start=1):
+    for ring_idx, (base_dist, count, base_rad) in enumerate(rings, start=1):
+        dist = int(base_dist * scale)
+        s_rad = int(base_rad * scale)
         for i in range(count):
             angle = i * (2 * math.pi / count)
             sx = center_x + dist * math.cos(angle)
@@ -194,26 +223,26 @@ def build_sockets(center_x, center_y, player_id):
     return sockets
 
 
-def create_ui_overlay(width, height, p1_center, p2_center):
-    """Pre-renders clean, elegant geometric guide lines and header badges."""
+def create_ui_overlay(width, height, p1_center, p2_center, scale=1.0):
+    """Pre-renders clean, elegant geometric guide lines scaled to resolution."""
     overlay = np.zeros((height, width, 3), dtype=np.uint8)
     center_x = width // 2
     
     def draw_mandala_guides(cx, cy, color):
-        # Subtle crisp concentric guide rings for enlarged Pookalam
-        for dist in [72, 138, 204]:
-            cv2.circle(overlay, (cx, cy), dist, color, 1, cv2.LINE_AA)
-        # 8 delicate connecting spokes
+        for base_dist in [72, 138, 204]:
+            cv2.circle(overlay, (cx, cy), int(base_dist * scale), color, 1, cv2.LINE_AA)
         for i in range(8):
             angle = i * (2 * math.pi / 8)
-            x1 = int(cx + 35 * math.cos(angle))
-            y1 = int(cy + 35 * math.sin(angle))
-            x2 = int(cx + 225 * math.cos(angle))
-            y2 = int(cy + 225 * math.sin(angle))
+            x1 = int(cx + 35 * scale * math.cos(angle))
+            y1 = int(cy + 35 * scale * math.sin(angle))
+            x2 = int(cx + 225 * scale * math.cos(angle))
+            y2 = int(cy + 225 * scale * math.sin(angle))
             cv2.line(overlay, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
 
-    # Subtle center divider line
-    cv2.line(overlay, (center_x, 10), (center_x, height - 105), (55, 70, 95), 1, cv2.LINE_AA)
+    # Subtle center divider line (avoiding top bar and bottom HUD)
+    top_margin = int(60 * scale)
+    bottom_margin = int(80 * scale)
+    cv2.line(overlay, (center_x, top_margin), (center_x, height - bottom_margin), (55, 70, 95), 1, cv2.LINE_AA)
     
     # Left & Right Mandala Guides
     draw_mandala_guides(p1_center[0], p1_center[1], (70, 95, 130))
@@ -222,19 +251,26 @@ def create_ui_overlay(width, height, p1_center, p2_center):
     return overlay
 
 
-def create_side_palette(width, height):
-    """Generates vertical flower palette on left and right edges."""
+def create_side_palette(width, height, scale=1.0, content_top=100, content_bottom=None):
+    """Generates vertical flower palette on left and right edges, scaled to resolution."""
     dots = []
     num_colors = len(FLOWER_PALETTE)
-    dock_top = 100
-    dock_bottom = height - 145
-    spacing = (dock_bottom - dock_top) // (num_colors - 1)
+    if content_bottom is None:
+        content_bottom = height - int(100 * scale)
     
-    radius = 24
+    # Leave room for "FLOWERS" header above and clear button below
+    flower_top = content_top + int(28 * scale)
+    flower_bottom = content_bottom - int(8 * scale)
+    spacing = max(1, (flower_bottom - flower_top) // max(1, num_colors - 1))
+    
+    radius = int(20 * scale)
+    dock_cx_left = int(55 * scale)
+    dock_cx_right = width - int(55 * scale)
+    
     for i, f in enumerate(FLOWER_PALETTE):
-        y = dock_top + i * spacing
-        dots.append(PaletteFlower(f"P1_{i}", 1, 68, y, radius, f["bgr"], f["name"]))
-        dots.append(PaletteFlower(f"P2_{i}", 2, width - 68, y, radius, f["bgr"], f["name"]))
+        y = flower_top + i * spacing
+        dots.append(PaletteFlower(f"P1_{i}", 1, dock_cx_left, y, radius, f["bgr"], f["name"]))
+        dots.append(PaletteFlower(f"P2_{i}", 2, dock_cx_right, y, radius, f["bgr"], f["name"]))
 
     return dots
 
@@ -411,19 +447,27 @@ def live_judge_worker(get_sockets_callback):
 
 
 def main():
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
+    ensure_hand_landmarker_model()
+    base_options = mp_tasks.BaseOptions(model_asset_path=HAND_LANDMARKER_MODEL_PATH)
+    landmarker_options = mp_vision.HandLandmarkerOptions(
+        base_options=base_options,
+        num_hands=2,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        running_mode=mp_vision.RunningMode.VIDEO,
     )
+    hands = mp_vision.HandLandmarker.create_from_options(landmarker_options)
+    video_timestamp_ms = 0
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         return
 
+    # Request highest available camera resolution
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap.set(cv2.CAP_PROP_FPS, 30)
 
     # Camera Warmup Retry Loop
@@ -437,35 +481,82 @@ def main():
     if frame is None:
         print("Error: Could not capture initial frame after camera warmup.")
         return
-        
-    height, width, _ = frame.shape
+
+    cam_h, cam_w = frame.shape[:2]
+    print(f"Camera native resolution: {cam_w}x{cam_h}")
+
+    # Ensure minimum display size while maintaining camera aspect ratio
+    if cam_w < 1280 or cam_h < 720:
+        upscale = max(1280.0 / cam_w, 720.0 / cam_h)
+        display_w = int(cam_w * upscale)
+        display_h = int(cam_h * upscale)
+    else:
+        display_w, display_h = cam_w, cam_h
+
+    width, height = display_w, display_h
+    print(f"Display resolution: {width}x{height}")
+
+    # Scale factor normalised to 1280x720 baseline
+    scale = min(width / 1280.0, height / 720.0)
+
+    # --- ADAPTIVE WINDOW SETUP ---
+    cv2.namedWindow('AR Pookalam', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('AR Pookalam', width, height)
+
+    # --- LAYOUT ZONES (scale-relative, non-overlapping) ---
     center_x = width // 2
+    top_bar_h = int(55 * scale)
+    bottom_hud_h = int(75 * scale)
+    dock_w = int(115 * scale)
 
-    # Spacious Pookalam Centers
-    p1_center = (width // 4, height // 2 - 20)
-    p2_center = (3 * width // 4, height // 2 - 20)
+    # Play area boundaries
+    play_left = dock_w
+    play_right = width - dock_w
+    play_top = top_bar_h
+    play_bottom = height - bottom_hud_h
+    play_w = play_right - play_left
+    play_h = play_bottom - play_top
 
-    # Translucent Floating Side Docks (Fingers visible through dock)
-    left_dock_rect = (14, 45, 122, height - 105)
-    right_dock_rect = (width - 122, 45, width - 14, height - 105)
+    # Pookalam scale: ensures mandala fits within available play area
+    max_pookalam_r = 229  # outer_ring_dist(204) + socket_radius(25) at base scale
+    pookalam_scale = min(scale,
+                         play_w / (4.0 * max_pookalam_r) * 0.88,
+                         play_h / (2.0 * max_pookalam_r) * 0.88)
 
-    # Clear Buttons at Dock Bottoms
-    p1_clear_rect = (20, height - 95, 116, height - 62)
-    p2_clear_rect = (width - 116, height - 95, width - 20, height - 62)
+    # Pookalam centers (centered in each half of play area)
+    p1_center = (play_left + play_w // 4, (play_top + play_bottom) // 2)
+    p2_center = (play_left + 3 * play_w // 4, (play_top + play_bottom) // 2)
 
-    # Bottom Live Judge Floating Island Card (Extra Large & Super Legible)
-    hud_w, hud_h = min(1120, width - 20), 112
-    judge_hud_rect = (center_x - hud_w // 2, height - hud_h - 10, center_x + hud_w // 2, height - 10)
+    # Side dock rects
+    dock_pad = int(8 * scale)
+    dock_content_top = top_bar_h + dock_pad
+    dock_content_bottom = height - bottom_hud_h - dock_pad
+    left_dock_rect = (dock_pad, dock_content_top, dock_w - dock_pad, dock_content_bottom)
+    right_dock_rect = (width - dock_w + dock_pad, dock_content_top, width - dock_pad, dock_content_bottom)
 
-    # 1. Pre-render Subtle Geometric Guide Overlay
-    ui_overlay = create_ui_overlay(width, height, p1_center, p2_center)
+    # Clear buttons at dock bottoms
+    clear_btn_h = int(28 * scale)
+    p1_clear_rect = (left_dock_rect[0] + 4, left_dock_rect[3] - clear_btn_h - 4,
+                     left_dock_rect[2] - 4, left_dock_rect[3] - 4)
+    p2_clear_rect = (right_dock_rect[0] + 4, right_dock_rect[3] - clear_btn_h - 4,
+                     right_dock_rect[2] - 4, right_dock_rect[3] - 4)
 
-    # 2. Build Enlarged Sockets
-    sockets = build_sockets(p1_center[0], p1_center[1], player_id=1) + \
-              build_sockets(p2_center[0], p2_center[1], player_id=2)
+    # Bottom Judge HUD (commentary only, no scores)
+    hud_w = min(int(850 * scale), width - int(20 * scale))
+    judge_hud_rect = (center_x - hud_w // 2, height - bottom_hud_h,
+                      center_x + hud_w // 2, height - int(6 * scale))
 
-    # 3. Create Palette Flowers
-    palette_dots = create_side_palette(width, height)
+    # 1. Pre-render Geometric Guide Overlay
+    ui_overlay = create_ui_overlay(width, height, p1_center, p2_center, pookalam_scale)
+
+    # 2. Build Scaled Sockets
+    sockets = build_sockets(p1_center[0], p1_center[1], player_id=1, scale=pookalam_scale) + \
+              build_sockets(p2_center[0], p2_center[1], player_id=2, scale=pookalam_scale)
+
+    # 3. Create Scaled Palette Flowers
+    palette_dots = create_side_palette(width, height, scale,
+                                       content_top=dock_content_top,
+                                       content_bottom=p1_clear_rect[1] - int(8 * scale))
 
     # Equipped Color per hand index
     hand_equipped_color = {
@@ -495,19 +586,23 @@ def main():
             time.sleep(0.01)
             continue
 
-        # Horizontal Mirror
+        # Horizontal Mirror + Scale to display resolution
         frame = cv2.flip(frame, 1)
+        if (frame.shape[1], frame.shape[0]) != (width, height):
+            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
 
-        # MediaPipe Hands Detection
+        # MediaPipe Hands Detection (Tasks API)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb_frame)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        video_timestamp_ms += int(1000 / 30)
+        results = hands.detect_for_video(mp_image, video_timestamp_ms)
 
         # Reset selection outlines
         for dot in palette_dots:
             dot.is_selected = False
 
-        if results.multi_hand_landmarks:
-            for hand_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+        if results.hand_landmarks:
+            for hand_idx, hand_landmarks in enumerate(results.hand_landmarks):
                 if hand_idx not in hand_equipped_color:
                     hand_equipped_color[hand_idx] = {
                         "color": FLOWER_PALETTE[0]["bgr"],
@@ -517,18 +612,19 @@ def main():
                 curr_equipped = hand_equipped_color[hand_idx]
 
                 # Index Fingertip is the Touch Pointer (Landmark 8)
-                index_tip = hand_landmarks.landmark[8]
+                index_tip = hand_landmarks[8]
                 ix = int(index_tip.x * width)
                 iy = int(index_tip.y * height)
 
-                index_mcp = hand_landmarks.landmark[5]
+                index_mcp = hand_landmarks[5]
                 mx = int(index_mcp.x * width)
                 my = int(index_mcp.y * height)
 
                 # --- 1. TOUCH DOCK: Equip / Select Color ---
+                touch_r = int(40 * scale)
                 for dot in palette_dots:
                     dist_to_dock = math.hypot(ix - dot.x, iy - dot.y)
-                    if dist_to_dock <= 44:
+                    if dist_to_dock <= touch_r:
                         hand_equipped_color[hand_idx] = {"color": dot.color, "name": dot.name}
                         curr_equipped = hand_equipped_color[hand_idx]
                         dot.touch_anim = 4
@@ -537,147 +633,197 @@ def main():
                         dot.is_selected = True
 
                 # --- 2. TOUCH SOCKET: Fill / Paint Socket ---
-                for s in sockets:
-                    dist_to_socket = math.hypot(ix - s.x, iy - s.y)
-                    if dist_to_socket <= s.radius + 12:
-                        if s.color != curr_equipped["color"]:
-                            s.color = curr_equipped["color"]
-                            s.flower_name = curr_equipped["name"]
-                            s.highlight_anim = 3
+                for sock in sockets:
+                    dist_to_socket = math.hypot(ix - sock.x, iy - sock.y)
+                    if dist_to_socket <= sock.radius + int(12 * scale):
+                        if sock.color != curr_equipped["color"]:
+                            sock.color = curr_equipped["color"]
+                            sock.flower_name = curr_equipped["name"]
+                            sock.highlight_anim = 3
 
                 # --- 3. TOUCH CLEAR BUTTONS ---
                 if p1_clear_rect[0] <= ix <= p1_clear_rect[2] and p1_clear_rect[1] <= iy <= p1_clear_rect[3]:
-                    for s in sockets:
-                        if s.player_id == 1:
-                            s.color = None
-                            s.flower_name = None
+                    for sock in sockets:
+                        if sock.player_id == 1:
+                            sock.color = None
+                            sock.flower_name = None
                 elif p2_clear_rect[0] <= ix <= p2_clear_rect[2] and p2_clear_rect[1] <= iy <= p2_clear_rect[3]:
-                    for s in sockets:
-                        if s.player_id == 2:
-                            s.color = None
-                            s.flower_name = None
+                    for sock in sockets:
+                        if sock.player_id == 2:
+                            sock.color = None
+                            sock.flower_name = None
 
                 # --- 4. RENDER MAGIC WAND POINTER (Flower Cursor) ---
                 brush_color = curr_equipped["color"]
                 cv2.line(frame, (mx, my), (ix, iy), (220, 235, 255), 1, cv2.LINE_AA)
-                cv2.circle(frame, (mx, my), 4, (180, 200, 230), -1, cv2.LINE_AA)
+                cv2.circle(frame, (mx, my), int(4 * scale), (180, 200, 230), -1, cv2.LINE_AA)
 
                 # Render active miniature flower cursor at fingertip
-                draw_styled_flower(frame, ix, iy, 15, brush_color)
+                draw_styled_flower(frame, ix, iy, int(15 * scale), brush_color)
 
                 # Floating Brush Pill Tag
-                badge_x, badge_y = max(10, ix - 50), max(25, iy - 26)
-                draw_rounded_rect(frame, (badge_x, badge_y - 15), (badge_x + 105, badge_y + 4), (12, 16, 26), radius=6, thickness=-1)
-                draw_rounded_rect(frame, (badge_x, badge_y - 15), (badge_x + 105, badge_y + 4), brush_color, radius=6, thickness=1)
-                cv2.putText(frame, f"{curr_equipped['name'][:8]}", (badge_x + 8, badge_y - 3),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (245, 245, 255), 1, cv2.LINE_AA)
+                pill_w = int(105 * scale)
+                pill_h = int(19 * scale)
+                badge_x = max(int(10 * scale), ix - pill_w // 2)
+                badge_y = max(int(25 * scale), iy - int(26 * scale))
+                draw_rounded_rect(frame, (badge_x, badge_y - pill_h + 4), (badge_x + pill_w, badge_y + 4),
+                                  (12, 16, 26), radius=int(6 * scale), thickness=-1)
+                draw_rounded_rect(frame, (badge_x, badge_y - pill_h + 4), (badge_x + pill_w, badge_y + 4),
+                                  brush_color, radius=int(6 * scale), thickness=1)
+                brush_font = max(0.28, 0.38 * scale)
+                cv2.putText(frame, f"{curr_equipped['name'][:8]}", (badge_x + int(8 * scale), badge_y - int(3 * scale)),
+                            cv2.FONT_HERSHEY_SIMPLEX, brush_font, (245, 245, 255), 1, cv2.LINE_AA)
 
-        # --- COMPOSITING & HIGH READABILITY UI RENDERING ---
+        # --- COMPOSITING & MODERNISED UI RENDERING ---
         
         # 1. Blend Subtle Geometric Mandala Guides
         frame = cv2.addWeighted(frame, 1.0, ui_overlay, 0.65, 0)
 
         # 2. Draw Sockets (Renders 4-Petal Flowers when filled)
-        for s in sockets:
-            s.draw(frame)
+        for sock in sockets:
+            sock.draw(frame)
 
-        # 3. Render Highly Translucent Left & Right Palette Docks (Alpha = 0.22 so fingers show clearly)
+        # 3. Translucent Left & Right Palette Docks
         draw_glass_card(frame, (left_dock_rect[0], left_dock_rect[1]), (left_dock_rect[2], left_dock_rect[3]),
-                        bg_color=(10, 14, 24), border_color=(75, 95, 125), alpha=0.22, radius=16)
+                        bg_color=(10, 14, 24), border_color=(75, 95, 125), alpha=0.22, radius=int(16 * scale))
         draw_glass_card(frame, (right_dock_rect[0], right_dock_rect[1]), (right_dock_rect[2], right_dock_rect[3]),
-                        bg_color=(10, 14, 24), border_color=(75, 95, 125), alpha=0.22, radius=16)
+                        bg_color=(10, 14, 24), border_color=(75, 95, 125), alpha=0.22, radius=int(16 * scale))
 
-        # Palette Dock Header Texts
-        cv2.putText(frame, "FLOWERS", (30, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 215, 240), 1, cv2.LINE_AA)
-        cv2.putText(frame, "FLOWERS", (width - 108, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 215, 240), 1, cv2.LINE_AA)
+        # Dock Header Labels
+        dock_hdr_font = max(0.3, 0.4 * scale)
+        cv2.putText(frame, "FLOWERS", (left_dock_rect[0] + int(6 * scale), left_dock_rect[1] + int(18 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, dock_hdr_font, (200, 215, 240), 1, cv2.LINE_AA)
+        cv2.putText(frame, "FLOWERS", (right_dock_rect[0] + int(6 * scale), right_dock_rect[1] + int(18 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, dock_hdr_font, (200, 215, 240), 1, cv2.LINE_AA)
 
         # Draw Palette Flowers
         for dot in palette_dots:
             dot.draw(frame)
 
-        # Clear Buttons at Dock Bottoms
+        # Clear Buttons
         draw_glass_card(frame, (p1_clear_rect[0], p1_clear_rect[1]), (p1_clear_rect[2], p1_clear_rect[3]),
-                        bg_color=(45, 18, 24), border_color=(190, 60, 75), alpha=0.45, radius=10)
+                        bg_color=(45, 18, 24), border_color=(190, 60, 75), alpha=0.45, radius=int(8 * scale))
         draw_glass_card(frame, (p2_clear_rect[0], p2_clear_rect[1]), (p2_clear_rect[2], p2_clear_rect[3]),
-                        bg_color=(45, 18, 24), border_color=(190, 60, 75), alpha=0.45, radius=10)
-        cv2.putText(frame, "CLEAR", (p1_clear_rect[0] + 18, p1_clear_rect[1] + 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 195, 205), 1, cv2.LINE_AA)
-        cv2.putText(frame, "CLEAR", (p2_clear_rect[0] + 18, p2_clear_rect[1] + 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 195, 205), 1, cv2.LINE_AA)
+                        bg_color=(45, 18, 24), border_color=(190, 60, 75), alpha=0.45, radius=int(8 * scale))
+        clear_font = max(0.28, 0.38 * scale)
+        for cr in [p1_clear_rect, p2_clear_rect]:
+            (tw, th), _ = cv2.getTextSize("CLEAR", cv2.FONT_HERSHEY_SIMPLEX, clear_font, 1)
+            ctx = cr[0] + ((cr[2] - cr[0]) - tw) // 2
+            cty = cr[1] + ((cr[3] - cr[1]) + th) // 2
+            cv2.putText(frame, "CLEAR", (ctx, cty),
+                        cv2.FONT_HERSHEY_SIMPLEX, clear_font, (255, 195, 205), 1, cv2.LINE_AA)
 
-        # 4. Top Player Header Badges
-        p1_pill = (width // 4 - 140, 12, width // 4 + 140, 42)
-        p2_pill = (3 * width // 4 - 140, 12, 3 * width // 4 + 140, 42)
-        draw_glass_card(frame, (p1_pill[0], p1_pill[1]), (p1_pill[2], p1_pill[3]),
-                        bg_color=(12, 16, 28), border_color=(0, 210, 255), alpha=0.82, radius=10)
-        draw_glass_card(frame, (p2_pill[0], p2_pill[1]), (p2_pill[2], p2_pill[3]),
-                        bg_color=(12, 16, 28), border_color=(205, 90, 255), alpha=0.82, radius=10)
-        
-        cv2.putText(frame, "PLAYER 1 : GOLDEN MANDALA", (p1_pill[0] + 14, p1_pill[1] + 21),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.46, (0, 225, 255), 1, cv2.LINE_AA)
-        cv2.putText(frame, "PLAYER 2 : ROYAL MANDALA", (p2_pill[0] + 14, p2_pill[1] + 21),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.46, (230, 110, 255), 1, cv2.LINE_AA)
-
-        # 5. Render Extra-Large High-Contrast Bottom Gemma 3 Live Judge Island
-        jx1, jy1, jx2, jy2 = judge_hud_rect
-        draw_glass_card(frame, (jx1, jy1), (jx2, jy2), bg_color=(6, 8, 16), border_color=(85, 115, 155), alpha=0.96, radius=18)
-
-        eval_mode = live_judge_state["eval_mode"]
-        model_name = live_judge_state["active_model"]
+        # 4. TOP SCOREBOARD (Scores prominently on top for each player)
         p1_s = live_judge_state["p1_score"]
         p2_s = live_judge_state["p2_score"]
         leader_text = live_judge_state["leader"]
-        commentary = sanitize_text(live_judge_state["commentary"])
 
-        # Top line: Model status badge
-        if eval_mode == "GEMMA_AI":
-            status_tag = f"AI: GEMMA 3 ({model_name})"
-            tag_color = (0, 255, 120)
-            tag_bg = (10, 48, 24)
-        else:
-            status_tag = "AI: RULE ENGINE (Offline)"
-            tag_color = (0, 200, 255)
-            tag_bg = (48, 30, 10)
+        card_h = int(42 * scale)
+        card_y1 = int(7 * scale)
+        card_y2 = card_y1 + card_h
+        card_w = int(250 * scale)
 
-        # Draw Mode Pill
-        draw_rounded_rect(frame, (jx1 + 18, jy1 + 12), (jx1 + 285, jy1 + 42), tag_bg, radius=8, thickness=-1)
-        draw_rounded_rect(frame, (jx1 + 18, jy1 + 12), (jx1 + 285, jy1 + 42), tag_color, radius=8, thickness=1)
-        cv2.putText(frame, status_tag, (jx1 + 26, jy1 + 32),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.44, tag_color, 1, cv2.LINE_AA)
+        # Player 1 Scoreboard (cyan accent)
+        p1_card_x1 = p1_center[0] - card_w // 2
+        p1_card_x2 = p1_center[0] + card_w // 2
+        p1_leading = leader_text == "PLAYER 1"
+        p1_border = (0, 230, 255) if p1_leading else (0, 120, 165)
+        draw_glass_card(frame, (p1_card_x1, card_y1), (p1_card_x2, card_y2),
+                        bg_color=(8, 14, 28), border_color=p1_border, alpha=0.88, radius=int(10 * scale))
+        p_label_font = max(0.28, 0.34 * scale)
+        p_score_font = max(0.38, 0.56 * scale)
+        cv2.putText(frame, "PLAYER 1", (p1_card_x1 + int(14 * scale), card_y1 + int(17 * scale)),
+                    cv2.FONT_HERSHEY_DUPLEX, p_label_font, (0, 200, 240), 1, cv2.LINE_AA)
+        p1_sc_color = (0, 255, 255) if p1_leading else (180, 200, 225)
+        cv2.putText(frame, f"{p1_s} PTS", (p1_card_x1 + int(14 * scale), card_y2 - int(8 * scale)),
+                    cv2.FONT_HERSHEY_DUPLEX, p_score_font, p1_sc_color, 1, cv2.LINE_AA)
+        cv2.putText(frame, "GOLDEN", (p1_card_x2 - int(80 * scale), card_y2 - int(8 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, max(0.25, 0.32 * scale), (110, 140, 180), 1, cv2.LINE_AA)
 
-        # Player Score Badges & Current Leader
-        p1_color = (0, 230, 255) if leader_text == "PLAYER 1" else (180, 195, 215)
-        p2_color = (230, 120, 255) if leader_text == "PLAYER 2" else (180, 195, 215)
-        
-        cv2.putText(frame, f"P1: {p1_s} PTS", (center_x - 155, jy1 + 34),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.62, p1_color, 2, cv2.LINE_AA)
-        
-        # Leader Pill
-        leader_str = f"{leader_text} LEADING" if leader_text != "TIE" else "ROUND TIED"
-        draw_rounded_rect(frame, (center_x - 30, jy1 + 12), (center_x + 155, jy1 + 42), (22, 38, 62), radius=8, thickness=-1)
-        draw_rounded_rect(frame, (center_x - 30, jy1 + 12), (center_x + 155, jy1 + 42), (90, 150, 215), radius=8, thickness=1)
-        cv2.putText(frame, leader_str, (center_x - 18, jy1 + 33),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.50, (120, 240, 255), 1, cv2.LINE_AA)
+        # Player 2 Scoreboard (magenta accent)
+        p2_card_x1 = p2_center[0] - card_w // 2
+        p2_card_x2 = p2_center[0] + card_w // 2
+        p2_leading = leader_text == "PLAYER 2"
+        p2_border = (205, 90, 255) if p2_leading else (130, 55, 165)
+        draw_glass_card(frame, (p2_card_x1, card_y1), (p2_card_x2, card_y2),
+                        bg_color=(8, 14, 28), border_color=p2_border, alpha=0.88, radius=int(10 * scale))
+        cv2.putText(frame, "PLAYER 2", (p2_card_x1 + int(14 * scale), card_y1 + int(17 * scale)),
+                    cv2.FONT_HERSHEY_DUPLEX, p_label_font, (210, 100, 245), 1, cv2.LINE_AA)
+        p2_sc_color = (255, 140, 255) if p2_leading else (180, 200, 225)
+        cv2.putText(frame, f"{p2_s} PTS", (p2_card_x1 + int(14 * scale), card_y2 - int(8 * scale)),
+                    cv2.FONT_HERSHEY_DUPLEX, p_score_font, p2_sc_color, 1, cv2.LINE_AA)
+        cv2.putText(frame, "ROYAL", (p2_card_x2 - int(70 * scale), card_y2 - int(8 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, max(0.25, 0.32 * scale), (110, 140, 180), 1, cv2.LINE_AA)
 
-        cv2.putText(frame, f"P2: {p2_s} PTS", (center_x + 190, jy1 + 34),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.62, p2_color, 2, cv2.LINE_AA)
+        # Center Leader Pill
+        leader_pill_w = int(120 * scale)
+        leader_pill_h = int(26 * scale)
+        lp_x1 = center_x - leader_pill_w // 2
+        lp_x2 = center_x + leader_pill_w // 2
+        lp_y1 = card_y1 + (card_h - leader_pill_h) // 2
+        lp_y2 = lp_y1 + leader_pill_h
+        leader_str = leader_text if leader_text != "TIE" else "TIED"
+        draw_glass_card(frame, (lp_x1, lp_y1), (lp_x2, lp_y2),
+                        bg_color=(18, 32, 52), border_color=(90, 150, 215), alpha=0.9, radius=int(8 * scale))
+        leader_font = max(0.28, 0.4 * scale)
+        (tw, th), _ = cv2.getTextSize(leader_str, cv2.FONT_HERSHEY_DUPLEX, leader_font, 1)
+        cv2.putText(frame, leader_str, (center_x - tw // 2, lp_y1 + (leader_pill_h + th) // 2),
+                    cv2.FONT_HERSHEY_DUPLEX, leader_font, (120, 240, 255), 1, cv2.LINE_AA)
 
-        # Bottom line: Extra-Large, Clean Live Commentary (No quotes, no unicode question marks)
-        draw_rounded_rect(frame, (jx1 + 18, jy1 + 52), (jx2 - 18, jy2 - 12), (12, 16, 28), radius=8, thickness=-1)
-        draw_rounded_rect(frame, (jx1 + 18, jy1 + 52), (jx2 - 18, jy2 - 12), (50, 70, 100), radius=8, thickness=1)
-        
-        # Draw clean "JUDGE:" tag + commentary text
-        cv2.putText(frame, "JUDGE:", (jx1 + 30, jy1 + 84),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.56, (120, 240, 255), 1, cv2.LINE_AA)
-        cv2.putText(frame, commentary[:85], (jx1 + 120, jy1 + 84),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.54, (255, 255, 255), 1, cv2.LINE_AA)
-
-        # 6. FPS Display
+        # FPS (top-right corner, subtle)
         curr_time = time.time()
         actual_fps = 1 / (curr_time - prev_time) if prev_time > 0 else 0
         prev_time = curr_time
-        cv2.putText(frame, f"FPS: {int(actual_fps)}", (center_x - 30, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (140, 245, 160), 1, cv2.LINE_AA)
+        fps_font = max(0.28, 0.36 * scale)
+        cv2.putText(frame, f"FPS:{int(actual_fps)}", (width - int(85 * scale), int(18 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, fps_font, (100, 180, 120), 1, cv2.LINE_AA)
+
+        # 5. BOTTOM JUDGE COMMENTARY HUD (commentary only)
+        jx1, jy1, jx2, jy2 = judge_hud_rect
+        draw_glass_card(frame, (jx1, jy1), (jx2, jy2),
+                        bg_color=(6, 8, 16), border_color=(85, 115, 155), alpha=0.94, radius=int(14 * scale))
+
+        eval_mode = live_judge_state["eval_mode"]
+        model_name = live_judge_state["active_model"]
+        commentary = sanitize_text(live_judge_state["commentary"])
+
+        hud_mid_y = (jy1 + jy2) // 2
+
+        # AI status pill
+        if eval_mode == "GEMMA_AI":
+            status_tag = f"AI: {model_name}"
+            tag_color = (0, 255, 120)
+            tag_bg = (10, 48, 24)
+        else:
+            status_tag = "AI: OFFLINE"
+            tag_color = (0, 200, 255)
+            tag_bg = (48, 30, 10)
+
+        tag_font = max(0.25, 0.34 * scale)
+        (stw, sth), _ = cv2.getTextSize(status_tag[:22], cv2.FONT_HERSHEY_DUPLEX, tag_font, 1)
+        ai_pill_w = stw + int(14 * scale)
+        ai_pill_h = sth + int(12 * scale)
+        pill_pad = int(10 * scale)
+        pill_x1 = jx1 + pill_pad
+        pill_y1 = hud_mid_y - ai_pill_h // 2
+        pill_y2 = pill_y1 + ai_pill_h
+        draw_rounded_rect(frame, (pill_x1, pill_y1), (pill_x1 + ai_pill_w, pill_y2),
+                          tag_bg, radius=int(6 * scale), thickness=-1)
+        draw_rounded_rect(frame, (pill_x1, pill_y1), (pill_x1 + ai_pill_w, pill_y2),
+                          tag_color, radius=int(6 * scale), thickness=1)
+        cv2.putText(frame, status_tag[:22], (pill_x1 + int(7 * scale), hud_mid_y + sth // 2),
+                    cv2.FONT_HERSHEY_DUPLEX, tag_font, tag_color, 1, cv2.LINE_AA)
+
+        # Judge commentary (right of AI pill)
+        judge_font = max(0.3, 0.42 * scale)
+        comment_font = max(0.28, 0.4 * scale)
+        comment_x = pill_x1 + ai_pill_w + int(14 * scale)
+        cv2.putText(frame, "JUDGE:", (comment_x, hud_mid_y + sth // 2),
+                    cv2.FONT_HERSHEY_DUPLEX, judge_font, (120, 240, 255), 1, cv2.LINE_AA)
+        (jw, _), _ = cv2.getTextSize("JUDGE:", cv2.FONT_HERSHEY_DUPLEX, judge_font, 1)
+        max_chars = max(30, int(70 * scale))
+        cv2.putText(frame, commentary[:max_chars], (comment_x + jw + int(8 * scale), hud_mid_y + sth // 2),
+                    cv2.FONT_HERSHEY_DUPLEX, comment_font, (255, 255, 255), 1, cv2.LINE_AA)
 
         cv2.imshow('AR Pookalam', frame)
 
@@ -687,7 +833,7 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-    hands.close()
+    hands.close()  # HandLandmarker cleanup
 
 if __name__ == "__main__":
     main()
