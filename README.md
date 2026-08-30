@@ -1,4 +1,4 @@
-# 🌸 AR Pookalam: Gemma 3 Live Judge 
+# 🌸 AR Pookalam: Gemma 3 Live Judge
 
 <p align="center">
   <img src="https://readme-typing-svg.herokuapp.com/?lines=Live+Gemma+3+Judging...;Zero+Latency+AR...;Local+Ollama+AI...;Multiplayer+Pookalam...&font=Fira+Code&center=true&width=500&height=45&color=F7921E&vCenter=true&size=22" alt="Typing SVG">
